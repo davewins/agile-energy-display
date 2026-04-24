@@ -1,0 +1,247 @@
+# =============================================================
+# Agile Energy Display – Home Assistant Templates
+# Replace SERIAL and MPAN with your meter's values.
+# These entity IDs must match what is configured in the
+# ESPHome substitutions (octopus_serial / octopus_mpan).
+# =============================================================
+
+- sensor:
+    - name: "Agile Tomorrow Lowest"
+      unique_id: agile_tomorrow_lowest
+      unit_of_measurement: "p/kWh"
+      icon: mdi:arrow-down-bold-circle-outline
+      availability: >
+        {{ state_attr('event.octopus_energy_electricity_SERIAL_MPAN_next_day_rates', 'min_rate') is not none }}
+      state: >
+        {% set v = state_attr('event.octopus_energy_electricity_SERIAL_MPAN_next_day_rates', 'min_rate') %}
+        {{ (v * 100) | round(2) }}
+      attributes:
+        slot: >
+          {% set rates = state_attr('event.octopus_energy_electricity_SERIAL_MPAN_next_day_rates', 'rates') or [] %}
+          {% if rates|length == 0 %}
+            {{ none }}
+          {% else %}
+            {% set minv = state_attr('event.octopus_energy_electricity_SERIAL_MPAN_next_day_rates', 'min_rate') %}
+            {% set matches = rates | selectattr('value_inc_vat', 'equalto', minv) | list %}
+            {% set r = matches[0] if matches|length > 0 else (rates | min(attribute='value_inc_vat')) %}
+            {% set s = as_local(as_datetime(r.start)) %}
+            {% set e = as_local(as_datetime(r.end)) %}
+            {{ s.strftime('%H:%M') }}–{{ e.strftime('%H:%M') }}
+          {% endif %}
+
+- sensor:
+    - name: "Agile Tomorrow Highest"
+      unique_id: agile_tomorrow_highest
+      unit_of_measurement: "p/kWh"
+      icon: mdi:arrow-up-bold-circle-outline
+      availability: >
+        {{ state_attr('event.octopus_energy_electricity_SERIAL_MPAN_next_day_rates', 'max_rate') is not none }}
+      state: >
+        {% set v = state_attr('event.octopus_energy_electricity_SERIAL_MPAN_next_day_rates', 'max_rate') %}
+        {{ (v * 100) | round(2) }}
+      attributes:
+        slot: >
+          {% set rates = state_attr('event.octopus_energy_electricity_SERIAL_MPAN_next_day_rates', 'rates') or [] %}
+          {% if rates|length == 0 %}
+            {{ none }}
+          {% else %}
+            {% set maxv = state_attr('event.octopus_energy_electricity_SERIAL_MPAN_next_day_rates', 'max_rate') %}
+            {% set matches = rates | selectattr('value_inc_vat', 'equalto', maxv) | list %}
+            {% set r = matches[0] if matches|length > 0 else (rates | max(attribute='value_inc_vat')) %}
+            {% set s = as_local(as_datetime(r.start)) %}
+            {% set e = as_local(as_datetime(r.end)) %}
+            {{ s.strftime('%H:%M') }}–{{ e.strftime('%H:%M') }}
+          {% endif %}
+
+- sensor:
+    - name: "Agile Tomorrow Average"
+      unique_id: agile_tomorrow_average
+      unit_of_measurement: "p/kWh"
+      icon: mdi:chart-line
+      availability: >
+        {% set v = state_attr('event.octopus_energy_electricity_SERIAL_MPAN_next_day_rates', 'average_rate') %}
+        {% set rates = state_attr('event.octopus_energy_electricity_SERIAL_MPAN_next_day_rates', 'rates') %}
+        {% if v is none or rates is none or rates | length == 0 %}
+          {{ false }}
+        {% else %}
+          {% set first_start = as_local(as_datetime(rates[0].start)) %}
+          {{ first_start.date() == (now().date() + timedelta(days=1)) }}
+        {% endif %}
+      state: >
+        {% set v = state_attr('event.octopus_energy_electricity_SERIAL_MPAN_next_day_rates', 'average_rate') %}
+        {{ (v * 100) | round(2) }}
+
+- sensor:
+    - name: "Agile Display Payload"
+      unique_id: agile_display_payload
+      state: "{{ now().strftime('%Y-%m-%d %H:%M') }}"
+      attributes:
+        today_prices_csv: >
+          {% set rates = state_attr('event.octopus_energy_electricity_SERIAL_MPAN_current_day_rates', 'rates') %}
+          {% if rates %}
+            {% set ns = namespace(values=[]) %}
+            {% for r in rates %}
+              {% set ns.values = ns.values + [((r.value_inc_vat * 100) | round(2))] %}
+            {% endfor %}
+            {{ ns.values | join(',') }}
+          {% else %}
+            {{ '' }}
+          {% endif %}
+        current_slot_index: >
+          {% set rates = state_attr('event.octopus_energy_electricity_SERIAL_MPAN_current_day_rates', 'rates') %}
+          {% if rates %}
+            {% set now_ts = now() %}
+            {% set ns = namespace(idx=0) %}
+            {% for r in rates %}
+              {% set start = as_datetime(r.start) %}
+              {% set end = as_datetime(r.end) %}
+              {% if start <= now_ts < end %}
+                {% set ns.idx = loop.index0 %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.idx }}
+          {% else %}
+            0
+          {% endif %}
+        best_remaining_text: >
+          {% set rates = state_attr('event.octopus_energy_electricity_SERIAL_MPAN_current_day_rates', 'rates') %}
+          {% if rates %}
+            {% set ns = namespace(best_price=999, best_time='--:--') %}
+            {% for r in rates %}
+              {% set start = as_datetime(r.start) %}
+              {% if start >= now() %}
+                {% set p = (r.value_inc_vat * 100) | round(2) %}
+                {% if p < ns.best_price %}
+                  {% set ns.best_price = p %}
+                  {% set ns.best_time = start.strftime('%H:%M') %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+            Best: {{ ns.best_price }}p @ {{ ns.best_time }}
+          {% else %}
+            --
+          {% endif %}
+        tomorrow_prices_csv: >
+          {% set rates = state_attr('event.octopus_energy_electricity_SERIAL_MPAN_next_day_rates', 'rates') %}
+          {% set tomorrow = (now().date() + timedelta(days=1)) %}
+          {% if rates is not none and rates | count > 0 %}
+            {% set first_start = as_datetime(rates[0].start).date() %}
+            {% if first_start == tomorrow %}
+              {% set ns = namespace(values=[]) %}
+              {% for r in rates %}
+                {% set ns.values = ns.values + [((r.value_inc_vat * 100) | round(2) | string)] %}
+              {% endfor %}
+              {{ ns.values | join(',') }}
+            {% else %}
+              none
+            {% endif %}
+          {% else %}
+            none
+          {% endif %}
+        tomorrow_ready: >
+          {% set rates = state_attr('event.octopus_energy_electricity_SERIAL_MPAN_next_day_rates', 'rates') %}
+          {% set tomorrow = (now().date() + timedelta(days=1)) %}
+          {% if rates is not none and rates | count > 0 %}
+            {{ as_datetime(rates[0].start).date() == tomorrow }}
+          {% else %}
+            false
+          {% endif %}
+
+- sensor:
+    - name: "Agile Today Average Rate"
+      unique_id: agile_today_average_rate
+      unit_of_measurement: "p"
+      state: >
+        {% set rates = state_attr('event.octopus_energy_electricity_SERIAL_MPAN_current_day_rates', 'rates') %}
+        {% if rates %}
+          {{ ((rates | map(attribute='value_inc_vat') | sum / (rates | count)) * 100) | round(1) }}
+        {% else %}
+          unknown
+        {% endif %}
+
+- sensor:
+    - name: "Agile Current Slot Text"
+      unique_id: agile_current_slot_text
+      state: >
+        {% set rates = state_attr('event.octopus_energy_electricity_SERIAL_MPAN_current_day_rates', 'rates') %}
+        {% if rates %}
+          {% set now_ts = now() %}
+          {% set ns = namespace(text='--:-- --:--') %}
+          {% for r in rates %}
+            {% set start = as_datetime(r.start) %}
+            {% set end = as_datetime(r.end) %}
+            {% if start <= now_ts < end %}
+              {% set ns.text = start.strftime('%H:%M') ~ '-' ~ end.strftime('%H:%M') %}
+            {% endif %}
+          {% endfor %}
+          {{ ns.text }}
+        {% else %}
+          --:-- --:--
+        {% endif %}
+
+- sensor:
+    - name: "Agile Today High Text"
+      unique_id: agile_today_high_text
+      state: >
+        {% set rates = state_attr('event.octopus_energy_electricity_SERIAL_MPAN_current_day_rates', 'rates') %}
+        {% if rates %}
+          {% set sorted_rates = rates | sort(attribute='value_inc_vat', reverse=true) %}
+          {% set high = sorted_rates[0] %}
+          High: {{ (high.value_inc_vat * 100) | round(2) }}p @ {{ as_datetime(high.start).strftime('%H:%M') }}
+        {% else %}
+          High: waiting...
+        {% endif %}
+
+- sensor:
+    - name: "Agile Tomorrow Best 2h Text"
+      unique_id: agile_tomorrow_best_2h_text
+      state: >
+        {% set rates = state_attr('event.octopus_energy_electricity_SERIAL_MPAN_next_day_rates', 'rates') or [] %}
+        {% if rates | length < 4 %}
+          Waiting...
+        {% else %}
+          {% set ns = namespace(best_avg=9999, best_start='--:--', best_end='--:--') %}
+          {% for i in range(0, (rates | length) - 3) %}
+            {% set r0 = rates[i].value_inc_vat | float(0) %}
+            {% set r1 = rates[i+1].value_inc_vat | float(0) %}
+            {% set r2 = rates[i+2].value_inc_vat | float(0) %}
+            {% set r3 = rates[i+3].value_inc_vat | float(0) %}
+            {% set avg = ((r0 + r1 + r2 + r3) / 4 * 100) | round(2) %}
+            {% if avg < ns.best_avg %}
+              {% set ns.best_avg = avg %}
+              {% set ns.best_start = as_datetime(rates[i].start).strftime('%H:%M') %}
+              {% set ns.best_end = as_datetime(rates[i+3].end).strftime('%H:%M') %}
+            {% endif %}
+          {% endfor %}
+          {{ ns.best_start }}-{{ ns.best_end }} @ {{ ns.best_avg }}p
+        {% endif %}
+
+- sensor:
+    - name: "Agile Tomorrow Peak Window Text"
+      unique_id: agile_tomorrow_peak_window_text
+      state: >
+        {% set rates = state_attr('event.octopus_energy_electricity_SERIAL_MPAN_next_day_rates', 'rates') or [] %}
+        {% set peak = namespace(vals=[], first='--:--', last='--:--') %}
+        {% for r in rates %}
+          {% set st = as_local(as_datetime(r.start)) %}
+          {% set en = as_local(as_datetime(r.end)) %}
+          {% if st.hour >= 16 and st.hour < 19 %}
+            {% if peak.first == '--:--' %}
+              {% set peak.first = st.strftime('%H:%M') %}
+            {% endif %}
+            {% set peak.last = en.strftime('%H:%M') %}
+            {% set peak.vals = peak.vals + [r.value_inc_vat | float(0)] %}
+          {% endif %}
+        {% endfor %}
+        {% if peak.vals | length == 0 %}
+          Waiting...
+        {% else %}
+          {{ peak.first }}-{{ peak.last }} @ {{ ((peak.vals | sum / (peak.vals | length)) * 100) | round(2) }}p
+        {% endif %}
+
+- binary_sensor:
+    - name: "Agile Display Night Mode"
+      unique_id: agile_display_night_mode
+      state: >
+        {% set h = now().hour %}
+        {{ h >= 21 or h < 7 }}
