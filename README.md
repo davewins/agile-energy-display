@@ -58,7 +58,7 @@ Other ESP32-S3 boards with the same display controller and pinout should work wi
 
 ## Getting Started
 
-See **[docs/setup.md](docs/setup.md)** for the full installation walkthrough, covering:
+See **[docs/Setup.md](docs/Setup.md)** for the full installation walkthrough, covering:
 
 - Installing ESPHome
 - Finding your meter serial and MPAN
