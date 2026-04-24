@@ -9,6 +9,17 @@ substitutions:
   # e.g. sensor.octopus_energy_electricity_SERIAL_MPAN_current_rate
   octopus_serial: "YOUR_METER_SERIAL"       # e.g. 23e5102151
   octopus_mpan: "YOUR_MPAN"                 # e.g. 1412483603003
+  # Current demand/power sensor entity ID.
+  # The Octopus Home Mini provides:
+  #   sensor.octopus_energy_electricity_SERIAL_MPAN_current_demand  (value in Watts)
+  # If you don't have a Home Mini, substitute any power sensor here.
+  # Note: the display assumes the value is in Watts. If your sensor
+  # reports in kW, adjust the formatting lambda in the ESPHome config.
+  current_demand_entity: "sensor.octopus_energy_electricity_${octopus_serial}_${octopus_mpan}_current_demand"
+  # Today's cumulative energy consumption sensor (value in kWh).
+  accumulative_consumption_entity: "sensor.octopus_energy_electricity_${octopus_serial}_${octopus_mpan}_current_accumulative_consumption"
+  # Today's cumulative cost sensor (value in £).
+  accumulative_cost_entity: "sensor.octopus_energy_electricity_${octopus_serial}_${octopus_mpan}_current_accumulative_cost"
 
 esphome:
   name: "${device_name}"
@@ -146,8 +157,18 @@ touchscreen:
               lambda: 'return id(tomorrow_page_active);'
             then:
               - script.stop: schedule_return_to_main
-              - lambda: 'id(tomorrow_page_active) = false;'
+              - lambda: |-
+                  id(tomorrow_page_active) = false;
+                  id(last_returned_from_tomorrow) = millis();
               - lvgl.page.show: page_main
+            else:
+              - if:
+                  condition:
+                    lambda: 'return (millis() - id(last_returned_from_tomorrow)) > 500;'
+                  then:
+                    - lambda: 'id(tomorrow_page_active) = true;'
+                    - lvgl.page.show: page_tomorrow
+                    - script.execute: schedule_return_to_main
 
 psram:
   mode: octal
@@ -216,6 +237,10 @@ globals:
     type: bool
     restore_value: no
     initial_value: "false"
+  - id: last_returned_from_tomorrow
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
 
 sensor:
   - platform: homeassistant
@@ -248,7 +273,7 @@ sensor:
 
   - platform: homeassistant
     id: sensor_house_load_kw
-    entity_id: sensor.octopus_energy_electricity_${octopus_serial}_${octopus_mpan}_current_demand
+    entity_id: "${current_demand_entity}"
     internal: true
     on_value:
       then:
@@ -265,7 +290,7 @@ sensor:
 
   - platform: homeassistant
     id: sensor_today_kwh
-    entity_id: sensor.octopus_energy_electricity_${octopus_serial}_${octopus_mpan}_current_accumulative_consumption
+    entity_id: "${accumulative_consumption_entity}"
     internal: true
     on_value:
       then:
@@ -277,7 +302,7 @@ sensor:
 
   - platform: homeassistant
     id: sensor_today_cost
-    entity_id: sensor.octopus_energy_electricity_${octopus_serial}_${octopus_mpan}_current_accumulative_cost
+    entity_id: "${accumulative_cost_entity}"
     internal: true
     on_value:
       then:
@@ -1228,27 +1253,6 @@ lvgl:
                   text_font: font_xs
                   text_color: 0x888888
 
-        - button:
-            id: btn_show_tomorrow_fullscreen
-            x: 0
-            y: 0
-            width: 480
-            height: 480
-            bg_opa: TRANSP
-            border_width: 0
-            shadow_width: 0
-            scrollbar_mode: "OFF"
-            scroll_dir: NONE
-            on_click:
-              then:
-                - if:
-                    condition:
-                      lambda: 'return !id(tomorrow_page_active);'
-                    then:
-                      - lambda: 'id(tomorrow_page_active) = true;'
-                      - lvgl.page.show: page_tomorrow
-                      - script.execute: schedule_return_to_main
-
         - obj:
             id: card_legend_main
             x: 10
@@ -1780,20 +1784,3 @@ lvgl:
                         text: "35p+"
                         text_font: font_xxs
                         text_color: 0xFFFFFF
-
-        - button:
-            id: btn_back_to_main
-            x: 0
-            y: 0
-            width: 480
-            height: 480
-            bg_opa: TRANSP
-            border_width: 0
-            shadow_width: 0
-            scrollbar_mode: "OFF"
-            scroll_dir: NONE
-            on_click:
-              then:
-                - script.stop: schedule_return_to_main
-                - lambda: 'id(tomorrow_page_active) = false;'
-                - lvgl.page.show: page_main
