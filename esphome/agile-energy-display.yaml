@@ -437,5 +437,1363 @@ binary_sensor:
       then:
         - script.execute: restore_auto_brightness
 
-# ... scripts and lvgl sections are unchanged from Tewkesbury version
-# (paste your existing script: and lvgl: blocks here as-is)
+script:
+  - id: schedule_return_to_main
+    mode: restart
+    then:
+      - delay: 45s
+      - lambda: 'id(tomorrow_page_active) = false;'
+      - lvgl.page.show: page_main
+
+  - id: apply_normal_brightness
+    then:
+      - light.turn_on:
+          id: display_backlight
+          brightness: !lambda 'return id(normal_brightness);'
+
+  - id: apply_dim_brightness
+    then:
+      - light.turn_on:
+          id: display_backlight
+          brightness: !lambda 'return id(dim_brightness);'
+
+  - id: restore_auto_brightness
+    then:
+      - if:
+          condition:
+            binary_sensor.is_on: bs_night_mode
+          then:
+            - script.execute: apply_dim_brightness
+          else:
+            - script.execute: apply_normal_brightness
+
+  - id: schedule_redim
+    mode: restart
+    then:
+      - delay: !lambda "return id(wake_timeout) * 1000;"
+      - script.execute: restore_auto_brightness
+
+  - id: update_now_card_colour_from_band
+    then:
+      - lambda: |-
+          const std::string csv = id(sensor_today_prices_csv).state;
+          int idx = atoi(id(sensor_current_slot_index_text).state.c_str());
+
+          if (csv.empty()) return;
+          if (idx < 0) idx = 0;
+          if (idx > 47) idx = 47;
+
+          float value = 0.0f;
+          int current = 0;
+          size_t start = 0;
+
+          for (size_t p = 0; p <= csv.size(); p++) {
+            if (p == csv.size() || csv[p] == ',') {
+              if (current == idx) {
+                value = atof(csv.substr(start, p - start).c_str());
+                break;
+              }
+              current++;
+              start = p + 1;
+            }
+          }
+
+          uint32_t bg = 0x1B5E20;
+          uint32_t border = 0x66BB6A;
+
+          if (value < 0.0f) {
+            bg = 0x1565C0;
+            border = 0x42A5F5;
+          } else if (value < 12.0f) {
+            bg = 0x558B2F;
+            border = 0x9CCC65;
+          } else if (value < 25.0f) {
+            bg = 0x1B5E20;
+            border = 0x66BB6A;
+          } else if (value < 35.0f) {
+            bg = 0xE65100;
+            border = 0xFFB74D;
+          } else {
+            bg = 0xC62828;
+            border = 0xEF5350;
+          }
+
+          lv_obj_set_style_bg_color(id(card_now), lv_color_hex(bg), LV_PART_MAIN);
+          lv_obj_set_style_border_color(id(card_now), lv_color_hex(border), LV_PART_MAIN);
+
+  - id: update_advice_text
+    then:
+      - lambda: |-
+          const std::string csv = id(sensor_today_prices_csv).state;
+          int idx = atoi(id(sensor_current_slot_index_text).state.c_str());
+
+          if (csv.empty()) {
+            lv_label_set_text(id(lbl_advice), "Loading tariff...");
+            return;
+          }
+
+          if (idx < 0) idx = 0;
+          if (idx > 47) idx = 47;
+
+          float values[48];
+          for (int i = 0; i < 48; i++) values[i] = 0.0f;
+
+          int current = 0;
+          size_t start = 0;
+          for (size_t p = 0; p <= csv.size(); p++) {
+            if (p == csv.size() || csv[p] == ',') {
+              if (current < 48) {
+                values[current] = atof(csv.substr(start, p - start).c_str());
+              }
+              current++;
+              start = p + 1;
+            }
+          }
+
+          const float value = values[idx];
+          const float next_value = (idx < 47) ? values[idx + 1] : values[idx];
+
+          float best_future = values[idx];
+          for (int i = idx; i < 48; i++) {
+            if (values[i] < best_future) best_future = values[i];
+          }
+
+          const float delta_best = value - best_future;
+          const float delta_next = value - next_value;
+
+          if (value < 0.0f) {
+            lv_label_set_text(id(lbl_advice), "Negative rate - ideal time to use power");
+          } else if (delta_best <= 0.1f) {
+            if (value < 12.0f) {
+              lv_label_set_text(id(lbl_advice), "Best remaining rate - very cheap now");
+            } else if (value < 25.0f) {
+              lv_label_set_text(id(lbl_advice), "Best remaining rate - below price cap");
+            } else if (value < 35.0f) {
+              lv_label_set_text(id(lbl_advice), "Best remaining rate - above price cap");
+            } else {
+              lv_label_set_text(id(lbl_advice), "Peak pricing - avoid heavy loads");
+            }
+          } else if (value < 12.0f) {
+            if (delta_best >= 2.0f) {
+              lv_label_set_text(id(lbl_advice), "Very cheap now - even cheaper later");
+            } else {
+              lv_label_set_text(id(lbl_advice), "Very cheap - great time to use power");
+            }
+          } else if (value < 25.0f) {
+            if (delta_best >= 3.0f) {
+              lv_label_set_text(id(lbl_advice), "Below price cap - cheaper later today");
+            } else {
+              lv_label_set_text(id(lbl_advice), "Below price cap - fine to use power");
+            }
+          } else if (value < 35.0f) {
+            if (delta_next >= 3.0f) {
+              lv_label_set_text(id(lbl_advice), "Above price cap - cheaper next slot");
+            } else if (delta_best >= 5.0f) {
+              lv_label_set_text(id(lbl_advice), "Above price cap - wait if possible");
+            } else {
+              lv_label_set_text(id(lbl_advice), "Above price cap - use with care");
+            }
+          } else {
+            if (delta_next >= 3.0f) {
+              lv_label_set_text(id(lbl_advice), "Peak pricing now - cheaper next slot");
+            } else if (delta_best >= 5.0f) {
+              lv_label_set_text(id(lbl_advice), "Peak pricing - wait if you can");
+            } else {
+              lv_label_set_text(id(lbl_advice), "Peak pricing - avoid heavy loads");
+            }
+          }
+
+  - id: schedule_chart_redraw
+    mode: restart
+    then:
+      - delay: 400ms
+      - script.execute: update_now_card_colour_from_band
+      - script.execute: update_advice_text
+      - script.execute: update_price_bars
+
+  - id: update_price_bars
+    mode: restart
+    then:
+      - lambda: |-
+          lv_obj_invalidate(id(price_plot));
+          lv_obj_t *bars[48] = {
+            id(bar_00), id(bar_01), id(bar_02), id(bar_03), id(bar_04), id(bar_05),
+            id(bar_06), id(bar_07), id(bar_08), id(bar_09), id(bar_10), id(bar_11),
+            id(bar_12), id(bar_13), id(bar_14), id(bar_15), id(bar_16), id(bar_17),
+            id(bar_18), id(bar_19), id(bar_20), id(bar_21), id(bar_22), id(bar_23),
+            id(bar_24), id(bar_25), id(bar_26), id(bar_27), id(bar_28), id(bar_29),
+            id(bar_30), id(bar_31), id(bar_32), id(bar_33), id(bar_34), id(bar_35),
+            id(bar_36), id(bar_37), id(bar_38), id(bar_39), id(bar_40), id(bar_41),
+            id(bar_42), id(bar_43), id(bar_44), id(bar_45), id(bar_46), id(bar_47)
+          };
+
+          const std::string csv = id(sensor_today_prices_csv).state;
+          if (csv.empty()) {
+            ESP_LOGW("agile_chart", "today_prices_csv is empty");
+            return;
+          }
+
+          int now_idx = 0;
+          if (!id(sensor_current_slot_index_text).state.empty()) {
+            now_idx = atoi(id(sensor_current_slot_index_text).state.c_str());
+          }
+          if (now_idx < 0) now_idx = 0;
+          if (now_idx > 47) now_idx = 47;
+          id(chart_now_index) = now_idx;
+
+          float values[48];
+          for (int i = 0; i < 48; i++) values[i] = 0.0f;
+
+          int current = 0;
+          size_t start = 0;
+          for (size_t p = 0; p <= csv.size(); p++) {
+            if (p == csv.size() || csv[p] == ',') {
+              if (current < 48) {
+                values[current] = atof(csv.substr(start, p - start).c_str());
+              }
+              current++;
+              start = p + 1;
+            }
+          }
+
+          for (int idx = 0; idx < 48; idx++) {
+            float value = values[idx];
+            float visual = value;
+
+            if (visual < 0.0f) visual = 0.0f;
+            if (visual > 45.0f) visual = 45.0f;
+
+            int bar_h = (value < 0.0f) ? 6 : (4 + (int) roundf((visual / 45.0f) * 58.0f));
+            int x = 6 + (idx * 9);
+            int y = 66 - bar_h;
+
+            uint32_t color = 0x555555;
+            uint32_t border_color = 0x555555;
+            int border_width = 0;
+
+            if (idx < now_idx) {
+              color = 0x2F2F2F;
+            } else if (value < 0.0f) {
+              color = 0x1565C0;
+            } else if (value < 12.0f) {
+              color = 0x558B2F;
+            } else if (value < 25.0f) {
+              color = 0x1B5E20;
+            } else if (value < 35.0f) {
+              color = 0xE65100;
+            } else {
+              color = 0xC62828;
+            }
+
+            if (idx == now_idx) {
+              border_width = 1;
+              border_color = 0xFFFFFF;
+            }
+
+            lv_obj_set_pos(bars[idx], x, y);
+            lv_obj_set_size(bars[idx], 8, bar_h);
+            lv_obj_set_style_radius(bars[idx], 1, LV_PART_MAIN);
+            lv_obj_set_style_bg_color(bars[idx], lv_color_hex(color), LV_PART_MAIN);
+            lv_obj_set_style_bg_opa(bars[idx], LV_OPA_COVER, LV_PART_MAIN);
+            lv_obj_set_style_border_width(bars[idx], border_width, LV_PART_MAIN);
+            lv_obj_set_style_border_color(bars[idx], lv_color_hex(border_color), LV_PART_MAIN);
+            lv_obj_set_style_border_opa(bars[idx], LV_OPA_COVER, LV_PART_MAIN);
+          }
+
+          lv_obj_t *marker = id(now_marker);
+          int marker_x = 10 + (now_idx * 9) + 3;
+          lv_obj_set_pos(marker, marker_x, 36);
+          lv_obj_set_size(marker, 2, 86);
+          lv_obj_set_style_bg_color(marker, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+          lv_obj_set_style_bg_opa(marker, LV_OPA_COVER, LV_PART_MAIN);
+          lv_obj_set_style_border_width(marker, 0, LV_PART_MAIN);
+
+  - id: schedule_tomorrow_chart_redraw
+    mode: restart
+    then:
+      - delay: 400ms
+      - script.execute: update_tomorrow_price_bars
+
+  - id: update_tomorrow_price_bars
+    mode: restart
+    then:
+      - lambda: |-
+          lv_obj_t *bars[48] = {
+            id(tbar_00), id(tbar_01), id(tbar_02), id(tbar_03), id(tbar_04), id(tbar_05),
+            id(tbar_06), id(tbar_07), id(tbar_08), id(tbar_09), id(tbar_10), id(tbar_11),
+            id(tbar_12), id(tbar_13), id(tbar_14), id(tbar_15), id(tbar_16), id(tbar_17),
+            id(tbar_18), id(tbar_19), id(tbar_20), id(tbar_21), id(tbar_22), id(tbar_23),
+            id(tbar_24), id(tbar_25), id(tbar_26), id(tbar_27), id(tbar_28), id(tbar_29),
+            id(tbar_30), id(tbar_31), id(tbar_32), id(tbar_33), id(tbar_34), id(tbar_35),
+            id(tbar_36), id(tbar_37), id(tbar_38), id(tbar_39), id(tbar_40), id(tbar_41),
+            id(tbar_42), id(tbar_43), id(tbar_44), id(tbar_45), id(tbar_46), id(tbar_47)
+          };
+
+          const std::string csv = id(sensor_tomorrow_prices_csv).state;
+
+          if (csv.empty() || csv == "none") {
+            lv_label_set_text(id(lbl_tomorrow_status), "Rates not published yet");
+
+            for (int idx = 0; idx < 48; idx++) {
+              int x = 6 + (idx * 9);
+              lv_obj_set_pos(bars[idx], x, 112);
+              lv_obj_set_size(bars[idx], 8, 6);
+              lv_obj_set_style_radius(bars[idx], 1, LV_PART_MAIN);
+              lv_obj_set_style_bg_color(bars[idx], lv_color_hex(0x2F2F2F), LV_PART_MAIN);
+              lv_obj_set_style_bg_opa(bars[idx], LV_OPA_COVER, LV_PART_MAIN);
+              lv_obj_set_style_border_width(bars[idx], 0, LV_PART_MAIN);
+            }
+            return;
+          }
+
+          lv_label_set_text(id(lbl_tomorrow_status), "Tomorrow");
+
+          float values[48];
+          for (int i = 0; i < 48; i++) values[i] = 0.0f;
+
+          int current = 0;
+          size_t start = 0;
+          for (size_t p = 0; p <= csv.size(); p++) {
+            if (p == csv.size() || csv[p] == ',') {
+              if (current < 48) {
+                values[current] = atof(csv.substr(start, p - start).c_str());
+              }
+              current++;
+              start = p + 1;
+            }
+          }
+
+          float min_price = 999.0f;
+          int min_idx = 0;
+
+          for (int i = 0; i < 48; i++) {
+            if (values[i] < min_price) {
+              min_price = values[i];
+              min_idx = i;
+            }
+          }
+
+          for (int idx = 0; idx < 48; idx++) {
+            float value = values[idx];
+            float visual = value;
+
+            if (visual < 0.0f) visual = 0.0f;
+            if (visual > 45.0f) visual = 45.0f;
+
+            int bar_h = (value < 0.0f) ? 6 : (6 + (int) roundf((visual / 45.0f) * 108.0f));
+            int x = 6 + (idx * 9);
+            int y = 118 - bar_h;
+
+            uint32_t color = 0x2F2F2F;
+            uint32_t border_color = 0x000000;
+            int border_width = 0;
+
+            if (idx == min_idx) {
+              border_width = 2;
+              border_color = 0xFFFFFF;
+            }
+
+            if (value < 0.0f) {
+              color = 0x1565C0;
+            } else if (value < 12.0f) {
+              color = 0x558B2F;
+            } else if (value < 25.0f) {
+              color = 0x1B5E20;
+            } else if (value < 35.0f) {
+              color = 0xE65100;
+            } else {
+              color = 0xC62828;
+            }
+
+            lv_obj_set_pos(bars[idx], x, y);
+            lv_obj_set_size(bars[idx], 8, bar_h);
+            lv_obj_set_style_radius(bars[idx], 1, LV_PART_MAIN);
+            lv_obj_set_style_bg_color(bars[idx], lv_color_hex(color), LV_PART_MAIN);
+            lv_obj_set_style_bg_opa(bars[idx], LV_OPA_COVER, LV_PART_MAIN);
+            lv_obj_set_style_border_width(bars[idx], border_width, LV_PART_MAIN);
+            lv_obj_set_style_border_color(bars[idx], lv_color_hex(border_color), LV_PART_MAIN);
+            lv_obj_set_style_border_opa(bars[idx], LV_OPA_COVER, LV_PART_MAIN);
+          }
+
+lvgl:
+  buffer_size: 25%
+  bg_color: 0x000000
+  text_color: 0xFFFFFF
+  default_font: font_xs
+
+  pages:
+    - id: page_main
+      width: 480
+      height: 480
+      widgets:
+        - obj:
+            id: header_bar
+            x: 0
+            y: 0
+            width: 480
+            height: 36
+            radius: 0
+            bg_color: 0x101010
+            border_width: 0
+            pad_all: 0
+            scrollbar_mode: "OFF"
+            scroll_dir: NONE
+            widgets:
+              - label:
+                  id: lbl_title
+                  x: 12
+                  y: 8
+                  text: "OCTOPUS AGILE"
+                  text_font: font_sm
+                  text_color: 0xFFFFFF
+
+              - label:
+                  id: lbl_clock
+                  align: TOP_RIGHT
+                  x: -12
+                  y: 8
+                  text: "--:--"
+                  text_align: RIGHT
+                  text_font: font_sm
+                  text_color: 0xFFFFFF
+
+        - obj:
+            id: card_now
+            x: 10
+            y: 46
+            width: 460
+            height: 92
+            radius: 14
+            bg_color: 0x222222
+            border_width: 2
+            border_color: 0x666666
+            pad_all: 0
+            scrollbar_mode: "OFF"
+            scroll_dir: NONE
+            widgets:
+              - label:
+                  id: lbl_now_caption
+                  x: 14
+                  y: 6
+                  text: "Now"
+                  text_font: font_sm
+                  text_color: 0xFFFFFF
+
+              - label:
+                  id: lbl_slot
+                  x: 82
+                  y: 10
+                  text: "--:--–--:--"
+                  text_font: font_xs
+                  text_color: 0xFFFFFF
+
+              - label:
+                  id: lbl_now_rate
+                  x: 14
+                  y: 28
+                  text: "--.--p"
+                  text_font: font_xl2
+                  text_color: 0xFFFFFF
+
+              - obj:
+                  id: next_column
+                  x: 170
+                  y: 40
+                  width: 120
+                  height: 22
+                  bg_opa: TRANSP
+                  border_width: 0
+                  pad_all: 0
+                  widgets:
+                    - label:
+                        id: lbl_next_rate
+                        x: 0
+                        y: 0
+                        width: 120
+                        text: "Next --.--p"
+                        text_align: LEFT
+                        text_font: font_xs
+                        text_color: 0xFFFFFF
+
+              - obj:
+                  id: load_column
+                  x: 300
+                  y: 10
+                  width: 150
+                  height: 56
+                  bg_opa: TRANSP
+                  border_width: 0
+                  pad_all: 0
+                  scrollbar_mode: "OFF"
+                  scroll_dir: NONE
+                  widgets:
+                    - label:
+                        id: lbl_house_caption
+                        x: 0
+                        y: 0
+                        width: 150
+                        text: "Current Usage"
+                        text_align: RIGHT
+                        text_font: font_sm
+                        text_color: 0xFFFFFF
+
+                    - label:
+                        id: lbl_house_load
+                        x: 0
+                        y: 24
+                        width: 150
+                        text: "--.-- kW"
+                        text_align: RIGHT
+                        text_font: font_md
+                        text_color: 0xFFFFFF
+
+        - obj:
+            id: card_advice
+            x: 10
+            y: 146
+            width: 460
+            height: 34
+            radius: 10
+            bg_color: 0x1A1A1A
+            border_width: 1
+            border_color: 0x444444
+            pad_all: 0
+            scrollbar_mode: "OFF"
+            scroll_dir: NONE
+            widgets:
+              - label:
+                  id: lbl_advice
+                  x: 14
+                  y: 6
+                  text: "Loading advice..."
+                  text_font: font_sm
+                  text_color: 0xFFFFFF
+
+        - obj:
+            id: card_today_kwh
+            x: 10
+            y: 190
+            width: 146
+            height: 72
+            radius: 12
+            bg_color: 0x2A2A2A
+            border_width: 1
+            border_color: 0x444444
+            scrollbar_mode: "OFF"
+            scroll_dir: NONE
+            widgets:
+              - label:
+                  id: lbl_today_kwh_title
+                  x: 12
+                  y: 0
+                  text: "Used Today"
+                  text_font: font_xs
+                  text_color: 0xBBBBBB
+              - label:
+                  id: lbl_today_kwh
+                  x: 12
+                  y: 24
+                  text: "--.- kWh"
+                  text_font: font_md
+                  text_color: 0xFFFFFF
+
+        - obj:
+            id: card_today_cost
+            x: 167
+            y: 190
+            width: 146
+            height: 72
+            radius: 12
+            bg_color: 0x2A2A2A
+            border_width: 1
+            border_color: 0x444444
+            scrollbar_mode: "OFF"
+            scroll_dir: NONE
+            widgets:
+              - label:
+                  id: lbl_today_cost_title
+                  x: 12
+                  y: 0
+                  text: "Cost Today"
+                  text_font: font_xs
+                  text_color: 0xBBBBBB
+              - label:
+                  id: lbl_today_cost
+                  x: 12
+                  y: 24
+                  text: "£--.--"
+                  text_font: font_md
+                  text_color: 0xFFFFFF
+
+        - obj:
+            id: card_today_avg
+            x: 324
+            y: 190
+            width: 146
+            height: 72
+            radius: 12
+            bg_color: 0x2A2A2A
+            border_width: 1
+            border_color: 0x444444
+            scrollbar_mode: "OFF"
+            scroll_dir: NONE
+            widgets:
+              - label:
+                  id: lbl_today_avg_title
+                  x: 20
+                  y: 0
+                  text: "Avg Rate"
+                  text_font: font_xs
+                  text_color: 0xBBBBBB
+              - label:
+                  id: lbl_today_avg
+                  x: 20
+                  y: 24
+                  text: "--.--p"
+                  text_font: font_md
+                  text_color: 0xFFFFFF
+
+        - obj:
+            id: card_chart
+            x: 10
+            y: 272
+            width: 460
+            height: 140
+            radius: 12
+            bg_color: 0x161616
+            border_width: 1
+            border_color: 0x505050
+            scrollbar_mode: "OFF"
+            scroll_dir: NONE
+            widgets:
+              - label:
+                  id: lbl_chart_title
+                  x: 12
+                  y: 4
+                  text: "Today's Prices"
+                  text_font: font_xs
+                  text_color: 0xBBBBBB
+
+              - label:
+                  id: lbl_best_remaining
+                  x: 250
+                  y: 4
+                  width: 185
+                  text: ""
+                  text_align: RIGHT
+                  text_font: font_xxs
+                  text_color: 0x7CFC00
+
+              - label:
+                  id: lbl_today_high_plot
+                  x: 250
+                  y: 18
+                  width: 185
+                  text: ""
+                  text_align: RIGHT
+                  text_font: font_xxs
+                  text_color: 0xFF6B6B
+
+              - obj:
+                  id: price_plot
+                  x: 10
+                  y: 36
+                  width: 440
+                  height: 86
+                  bg_color: 0x161616
+                  border_width: 0
+                  pad_all: 0
+                  scrollbar_mode: "OFF"
+                  scroll_dir: NONE
+                  clip_corner: false
+                  bg_opa: COVER
+                  widgets:
+                    - obj: { id: bar_00, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_01, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_02, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_03, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_04, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_05, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_06, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_07, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_08, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_09, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_10, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_11, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_12, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_13, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_14, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_15, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_16, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_17, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_18, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_19, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_20, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_21, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_22, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_23, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_24, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_25, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_26, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_27, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_28, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_29, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_30, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_31, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_32, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_33, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_34, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_35, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_36, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_37, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_38, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_39, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_40, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_41, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_42, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_43, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_44, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_45, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_46, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+                    - obj: { id: bar_47, x: 0, y: 60, width: 8, height: 6, bg_color: 0x444444, border_width: 0, radius: 1, scrollbar_mode: "OFF", scroll_dir: NONE }
+
+              - obj:
+                  id: now_marker
+                  x: 10
+                  y: 22
+                  width: 2
+                  height: 68
+                  bg_color: 0xFFFFFF
+                  border_width: 0
+                  radius: 0
+                  scrollbar_mode: "OFF"
+                  scroll_dir: NONE
+
+              - obj:
+                  id: grid_6
+                  x: 114
+                  y: 40
+                  width: 1
+                  height: 68
+                  bg_color: 0x888888
+                  border_width: 0
+
+              - obj:
+                  id: grid_12
+                  x: 222
+                  y: 40
+                  width: 1
+                  height: 68
+                  bg_color: 0x888888
+                  border_width: 0
+
+              - obj:
+                  id: grid_18
+                  x: 330
+                  y: 40
+                  width: 1
+                  height: 68
+                  bg_color: 0x888888
+                  border_width: 0
+
+              - label:
+                  id: lbl_hour_00
+                  x: 14
+                  y: 105
+                  text: "00"
+                  text_font: font_xs
+                  text_color: 0x888888
+
+              - label:
+                  id: lbl_hour_06
+                  x: 116
+                  y: 105
+                  text: "06"
+                  text_font: font_xs
+                  text_color: 0x888888
+
+              - label:
+                  id: lbl_hour_12
+                  x: 224
+                  y: 105
+                  text: "12"
+                  text_font: font_xs
+                  text_color: 0x888888
+
+              - label:
+                  id: lbl_hour_18
+                  x: 332
+                  y: 105
+                  text: "18"
+                  text_font: font_xs
+                  text_color: 0x888888
+
+        - button:
+            id: btn_show_tomorrow_fullscreen
+            x: 0
+            y: 0
+            width: 480
+            height: 480
+            bg_opa: TRANSP
+            border_width: 0
+            shadow_width: 0
+            scrollbar_mode: "OFF"
+            scroll_dir: NONE
+            on_click:
+              then:
+                - if:
+                    condition:
+                      lambda: 'return !id(tomorrow_page_active);'
+                    then:
+                      - lambda: 'id(tomorrow_page_active) = true;'
+                      - lvgl.page.show: page_tomorrow
+                      - script.execute: schedule_return_to_main
+
+        - obj:
+            id: card_legend_main
+            x: 10
+            y: 420
+            width: 460
+            height: 55
+            radius: 10
+            bg_color: 0x141414
+            border_width: 1
+            border_color: 0x303030
+            pad_all: 0
+            scrollbar_mode: "OFF"
+            scroll_dir: NONE
+            widgets:
+              - label:
+                  id: lbl_legend_main_title
+                  x: 10
+                  y: 4
+                  text: "Rate bands"
+                  text_font: font_xs
+                  text_color: 0xBBBBBB
+
+              - obj:
+                  id: legend_main_blue
+                  x: 10
+                  y: 30
+                  width: 12
+                  height: 12
+                  radius: 2
+                  bg_color: 0x1565C0
+                  border_width: 0
+
+              - label:
+                  id: lbl_legend_main_blue
+                  x: 28
+                  y: 26
+                  text: "Neg"
+                  text_font: font_xxs
+                  text_color: 0xFFFFFF
+
+              - obj:
+                  id: legend_main_light_green
+                  x: 78
+                  y: 30
+                  width: 12
+                  height: 12
+                  radius: 2
+                  bg_color: 0x558B2F
+                  border_width: 0
+
+              - label:
+                  id: lbl_legend_main_light_green
+                  x: 96
+                  y: 26
+                  text: "0-12p"
+                  text_font: font_xxs
+                  text_color: 0xFFFFFF
+
+              - obj:
+                  id: legend_main_green
+                  x: 158
+                  y: 30
+                  width: 12
+                  height: 12
+                  radius: 2
+                  bg_color: 0x1B5E20
+                  border_width: 0
+
+              - label:
+                  id: lbl_legend_main_green
+                  x: 176
+                  y: 26
+                  text: "12-25p"
+                  text_font: font_xxs
+                  text_color: 0xFFFFFF
+
+              - obj:
+                  id: legend_main_amber
+                  x: 258
+                  y: 30
+                  width: 12
+                  height: 12
+                  radius: 2
+                  bg_color: 0xE65100
+                  border_width: 0
+
+              - label:
+                  id: lbl_legend_main_amber
+                  x: 276
+                  y: 26
+                  text: "25-35p"
+                  text_font: font_xxs
+                  text_color: 0xFFFFFF
+
+              - obj:
+                  id: legend_main_red
+                  x: 378
+                  y: 30
+                  width: 12
+                  height: 12
+                  radius: 2
+                  bg_color: 0xC62828
+                  border_width: 0
+
+              - label:
+                  id: lbl_legend_main_red
+                  x: 396
+                  y: 26
+                  text: "35p+"
+                  text_font: font_xxs
+                  text_color: 0xFFFFFF
+
+    - id: page_tomorrow
+      width: 480
+      height: 480
+      widgets:
+        - obj:
+            id: tomorrow_page_bg
+            x: 0
+            y: 0
+            width: 480
+            height: 480
+            bg_color: 0x000000
+            border_width: 0
+            pad_all: 0
+            scrollbar_mode: "OFF"
+            scroll_dir: NONE
+            widgets:
+              - label:
+                  id: lbl_tomorrow_status
+                  x: 14
+                  y: 12
+                  text: "Tomorrow"
+                  text_font: font_lg
+                  text_color: 0xFFFFFF
+
+              - label:
+                  id: lbl_tomorrow_hint
+                  x: 14
+                  y: 50
+                  text: "Tap anywhere to return"
+                  text_font: font_xs
+                  text_color: 0xBBBBBB
+
+              - obj:
+                  id: tomorrow_plot
+                  x: 10
+                  y: 78
+                  width: 460
+                  height: 160
+                  radius: 12
+                  bg_color: 0x161616
+                  border_width: 1
+                  border_color: 0x505050
+                  pad_all: 0
+                  scrollbar_mode: "OFF"
+                  scroll_dir: NONE
+                  widgets:
+                    - obj:
+                        id: tomorrow_price_plot
+                        x: 10
+                        y: 6
+                        width: 440
+                        height: 150
+                        bg_color: 0x161616
+                        border_width: 0
+                        pad_all: 0
+                        scrollbar_mode: "OFF"
+                        scroll_dir: NONE
+                        widgets:
+                          - obj: { id: tbar_00, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_01, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_02, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_03, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_04, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_05, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_06, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_07, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_08, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_09, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_10, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_11, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_12, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_13, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_14, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_15, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_16, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_17, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_18, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_19, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_20, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_21, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_22, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_23, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_24, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_25, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_26, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_27, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_28, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_29, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_30, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_31, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_32, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_33, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_34, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_35, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_36, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_37, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_38, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_39, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_40, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_41, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_42, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_43, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_44, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_45, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_46, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+                          - obj: { id: tbar_47, x: 0, y: 110, width: 8, height: 6, bg_color: 0x2F2F2F, border_width: 0, radius: 1 }
+
+                          - label:
+                              id: lbl_tomorrow_hour_00
+                              x: 0
+                              y: 120
+                              text: "00"
+                              text_font: font_xs
+                              text_color: 0x888888
+
+                          - label:
+                              id: lbl_tomorrow_hour_06
+                              x: 114
+                              y: 120
+                              text: "06"
+                              text_font: font_xs
+                              text_color: 0x888888
+
+                          - label:
+                              id: lbl_tomorrow_hour_12
+                              x: 222
+                              y: 120
+                              text: "12"
+                              text_font: font_xs
+                              text_color: 0x888888
+
+                          - label:
+                              id: lbl_tomorrow_hour_18
+                              x: 330
+                              y: 120
+                              text: "18"
+                              text_font: font_xs
+                              text_color: 0x888888
+
+                          - obj:
+                              id: tgrid_06
+                              x: 114
+                              y: 0
+                              width: 1
+                              height: 118
+                              bg_color: 0x888888
+                              border_width: 0
+
+                          - obj:
+                              id: tgrid_12
+                              x: 222
+                              y: 0
+                              width: 1
+                              height: 118
+                              bg_color: 0x888888
+                              border_width: 0
+
+                          - obj:
+                              id: tgrid_18
+                              x: 330
+                              y: 0
+                              width: 1
+                              height: 118
+                              bg_color: 0x888888
+                              border_width: 0
+
+              - obj:
+                  id: card_tomorrow_low
+                  x: 10
+                  y: 255
+                  width: 146
+                  height: 72
+                  radius: 12
+                  bg_color: 0x2A2A2A
+                  border_width: 1
+                  border_color: 0x444444
+                  scrollbar_mode: "OFF"
+                  scroll_dir: NONE
+                  widgets:
+                    - label:
+                        id: lbl_tomorrow_low_title
+                        x: 12
+                        y: 0
+                        text: "Tomorrow Low"
+                        text_font: font_xs
+                        text_color: 0xBBBBBB
+                    - label:
+                        id: lbl_tomorrow_low_value
+                        x: 12
+                        y: 24
+                        text: "--.--p"
+                        text_font: font_md
+                        text_color: 0x7CFC00
+
+              - obj:
+                  id: card_tomorrow_high
+                  x: 167
+                  y: 255
+                  width: 146
+                  height: 72
+                  radius: 12
+                  bg_color: 0x2A2A2A
+                  border_width: 1
+                  border_color: 0x444444
+                  scrollbar_mode: "OFF"
+                  scroll_dir: NONE
+                  widgets:
+                    - label:
+                        id: lbl_tomorrow_high_title
+                        x: 12
+                        y: 0
+                        text: "Tomorrow High"
+                        text_font: font_xs
+                        text_color: 0xBBBBBB
+                    - label:
+                        id: lbl_tomorrow_high_value
+                        x: 12
+                        y: 24
+                        text: "--.--p"
+                        text_font: font_md
+                        text_color: 0xFF6B6B
+
+              - obj:
+                  id: card_tomorrow_avg
+                  x: 324
+                  y: 255
+                  width: 146
+                  height: 72
+                  radius: 12
+                  bg_color: 0x2A2A2A
+                  border_width: 1
+                  border_color: 0x444444
+                  scrollbar_mode: "OFF"
+                  scroll_dir: NONE
+                  widgets:
+                    - label:
+                        id: lbl_tomorrow_avg_title
+                        x: 12
+                        y: 0
+                        text: "Tomorrow Avg"
+                        text_font: font_xs
+                        text_color: 0xBBBBBB
+                    - label:
+                        id: lbl_tomorrow_avg_value
+                        x: 12
+                        y: 24
+                        text: "--.--p"
+                        text_font: font_md
+                        text_color: 0xFFFFFF
+
+              - obj:
+                  id: card_tomorrow_best_2h
+                  x: 10
+                  y: 340
+                  width: 224
+                  height: 64
+                  radius: 12
+                  bg_color: 0x2A2A2A
+                  border_width: 1
+                  border_color: 0x444444
+                  scrollbar_mode: "OFF"
+                  scroll_dir: NONE
+                  widgets:
+                    - label:
+                        id: lbl_tomorrow_best_2h_title
+                        x: 12
+                        y: 4
+                        text: "Best 2h Window"
+                        text_font: font_xs
+                        text_color: 0xBBBBBB
+                    - label:
+                        id: lbl_tomorrow_best_2h_value
+                        x: 12
+                        y: 28
+                        width: 200
+                        text: "Waiting..."
+                        text_font: font_xxs
+                        text_color: 0x7CFC00
+
+              - obj:
+                  id: card_tomorrow_peak_window
+                  x: 246
+                  y: 340
+                  width: 224
+                  height: 64
+                  radius: 12
+                  bg_color: 0x2A2A2A
+                  border_width: 1
+                  border_color: 0x444444
+                  scrollbar_mode: "OFF"
+                  scroll_dir: NONE
+                  widgets:
+                    - label:
+                        id: lbl_tomorrow_peak_window_title
+                        x: 12
+                        y: 4
+                        text: "Peak Window"
+                        text_font: font_xs
+                        text_color: 0xBBBBBB
+                    - label:
+                        id: lbl_tomorrow_peak_window_value
+                        x: 12
+                        y: 28
+                        width: 200
+                        text: "Waiting..."
+                        text_font: font_xxs
+                        text_color: 0xFFB74D
+
+              - obj:
+                  id: legend_card
+                  x: 10
+                  y: 420
+                  width: 460
+                  height: 55
+                  radius: 10
+                  bg_color: 0x141414
+                  border_width: 1
+                  border_color: 0x303030
+                  pad_all: 0
+                  scrollbar_mode: "OFF"
+                  scroll_dir: NONE
+                  widgets:
+                    - label:
+                        id: lbl_legend_title
+                        x: 10
+                        y: 4
+                        text: "Rate bands"
+                        text_font: font_xs
+                        text_color: 0xBBBBBB
+
+                    - obj:
+                        id: legend_blue
+                        x: 10
+                        y: 30
+                        width: 12
+                        height: 12
+                        radius: 2
+                        bg_color: 0x1565C0
+                        border_width: 0
+
+                    - label:
+                        id: lbl_legend_blue
+                        x: 28
+                        y: 26
+                        text: "Neg"
+                        text_font: font_xxs
+                        text_color: 0xFFFFFF
+
+                    - obj:
+                        id: legend_light_green
+                        x: 78
+                        y: 30
+                        width: 12
+                        height: 12
+                        radius: 2
+                        bg_color: 0x558B2F
+                        border_width: 0
+
+                    - label:
+                        id: lbl_legend_light_green
+                        x: 96
+                        y: 26
+                        text: "0-12p"
+                        text_font: font_xxs
+                        text_color: 0xFFFFFF
+
+                    - obj:
+                        id: legend_green
+                        x: 158
+                        y: 30
+                        width: 12
+                        height: 12
+                        radius: 2
+                        bg_color: 0x1B5E20
+                        border_width: 0
+
+                    - label:
+                        id: lbl_legend_green
+                        x: 176
+                        y: 26
+                        text: "12-25p"
+                        text_font: font_xxs
+                        text_color: 0xFFFFFF
+
+                    - obj:
+                        id: legend_amber
+                        x: 258
+                        y: 30
+                        width: 12
+                        height: 12
+                        radius: 2
+                        bg_color: 0xE65100
+                        border_width: 0
+
+                    - label:
+                        id: lbl_legend_amber
+                        x: 276
+                        y: 26
+                        text: "25-35p"
+                        text_font: font_xxs
+                        text_color: 0xFFFFFF
+
+                    - obj:
+                        id: legend_red
+                        x: 378
+                        y: 30
+                        width: 12
+                        height: 12
+                        radius: 2
+                        bg_color: 0xC62828
+                        border_width: 0
+
+                    - label:
+                        id: lbl_legend_red
+                        x: 396
+                        y: 26
+                        text: "35p+"
+                        text_font: font_xxs
+                        text_color: 0xFFFFFF
+
+        - button:
+            id: btn_back_to_main
+            x: 0
+            y: 0
+            width: 480
+            height: 480
+            bg_opa: TRANSP
+            border_width: 0
+            shadow_width: 0
+            scrollbar_mode: "OFF"
+            scroll_dir: NONE
+            on_click:
+              then:
+                - script.stop: schedule_return_to_main
+                - lambda: 'id(tomorrow_page_active) = false;'
+                - lvgl.page.show: page_main
